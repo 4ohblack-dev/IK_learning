@@ -1,6 +1,7 @@
-import pygame
 import time
 from dataclasses import dataclass
+
+import pygame
 
 def deadzone(v,threshold=0.05):
     return 0 if abs(v) < threshold else v

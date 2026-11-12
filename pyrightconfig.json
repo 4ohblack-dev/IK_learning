@@ -1,0 +1,4 @@
+{
+    "include": ["*.py"],
+    "extraPaths": ["./python-st3215"]
+}

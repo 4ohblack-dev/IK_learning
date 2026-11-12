@@ -1,6 +1,7 @@
 import xml.etree.ElementTree as ET
-from pathlib import Path
 from dataclasses import dataclass
+from pathlib import Path
+
 import numpy as np
 
 ROOT = Path(__file__).resolve().parent
