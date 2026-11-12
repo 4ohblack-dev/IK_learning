@@ -48,16 +48,74 @@ result["success"] を確認（失敗したら送信しない）
 MoveTo()で各サーボへ目標を送信
 '''
 
-def main():
-    arm = ArmKinematics()
-    target = np.array([0.15, 0.0, 0.20])
-    seed = np.array([0.0, 1.75, -1.57, -0.5, 0.0])#今のsts3215の角度
-    result = arm.solve_position_IK(target=target,seed=seed,)
+import time
 
-    print("goal [m]:", target)
-    print("result:", result)
-    print("position from FK [m]:", arm.position(result["q"]))
+from controller_input import Controller
+from servo_com import handle_STS3215
+
+PORT = "COM7"
+SERVO_IDS = [1, 2, 3, 4, 5]
+REFERENCE_Q = [0.0, 1.75, -1.57, -0.5, 0.0]
+DIRECTIONS = [1,1,1,1,1]
+
+def run(port, servo_ids, reference_q, directions):
+    controller = Controller()
+    servo = None
+
+    try:
+        if not controller.getController():
+            raise RuntimeError("コントローラがありません")
+
+        servo = handle_STS3215(port)
+        servo.setup(servo_ids)
+
+        calibrated = servo.load_calibration(servo_ids)
+        print("校正済み" if calibrated else "未校正です")
+        print("校正姿勢に合わせて、△ボタンを押してください")
+
+        # 起動時から押されている場合は、いったん離してから受け付ける
+        previous_button = bool(controller.read().tri_button)
+
+        while True:
+            inputs = controller.read()
+            current_button = bool(inputs.tri_button)
+
+            # 押した瞬間だけ校正する
+            if current_button and not previous_button:
+                calibrated = False
+
+                servo.calibrate_and_save(
+                    servo_ids,
+                    reference_q,
+                    directions,
+                )
+
+                calibrated = True
+                print("校正値を保存しました")
+
+            previous_button = current_button
+
+            if calibrated:
+                positions = servo.read_positions(servo_ids)
+                current_q = servo.toAngle(servo_ids, positions)
+
+                print("関節角度 [rad]:", current_q)
+                # IKには、このcurrent_qをseedとして渡す
+                # result = arm.solve_position_IK(target, current_q)
+
+            time.sleep(0.05)
+
+    except KeyboardInterrupt:
+        pass
+    finally:
+        if servo is not None:
+            servo.close()
+        controller.close()
+
 
 
 if __name__ == "__main__":
-    main()
+    run(port=PORT,
+        servo_ids=SERVO_IDS,
+        reference_q=REFERENCE_Q,
+        directions=DIRECTIONS,)
