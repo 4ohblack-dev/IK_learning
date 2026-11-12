@@ -5,7 +5,7 @@ from pathlib import Path
 import numpy as np
 
 ROOT = Path(__file__).resolve().parent
-URDF = ROOT / "SO-ARM100/Simulation/SO100/so100.urdf"
+URDF = ROOT / "SO-ARM100/Simulation/SO101/so101_new_calib.urdf"
 ARM_NAMES =("shoulder_pan", "shoulder_lift", "elbow_flex",
     "wrist_flex", "wrist_roll")
     

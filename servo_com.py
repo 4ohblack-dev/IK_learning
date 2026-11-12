@@ -124,9 +124,20 @@ class handle_STS3215:
             q.append(radians)
         return np.array(q,dtype=float)
 
+    def toPosition(self,servo_ids,q,q_min,q_max):
+        servo_ids = tuple(servo_ids)
+        count = len(servo_ids)
+        q = np.asarray(q,dtype=float)
+        q_min = np.asarray(q_min,dtype=float)
+        q_max = np.asarray(q_max,dtype=float)
+        if any(v.shape != (count,) for v in (q,q_min,q_max)):
+            raise ValueError("the number error")
+        if not all(np.all(np.isfinite(v)) for v in (q, q_min, q_max)):
+            raise ValueError("invalid values")
     def close(self):
         if self.st3215.portHandler.is_open:
             self.st3215.portHandler.closePort()
+
 
 
 

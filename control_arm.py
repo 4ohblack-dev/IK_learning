@@ -55,64 +55,96 @@ from servo_com import handle_STS3215
 
 PORT = "COM7"
 SERVO_IDS = [1, 2, 3, 4, 5]
-REFERENCE_Q = [0.0, 1.75, -1.57, -0.5, 0.0]
+REFERENCE_Q = [0.0, 0.0, 0.0, 0.0, 0.0]
 DIRECTIONS = [1,1,1,1,1]
 
 def run(port, servo_ids, reference_q, directions):
+    arm = ArmKinematics(base_link="base_link")
+    user_zero = UserZero(arm)
+    if len(servo_ids) != arm.dof:
+        raise ValueError("servo_ids error : unmatch with arm.dof")
     controller = Controller()
     servo = None
 
     try:
         if not controller.getController():
-            raise RuntimeError("コントローラがありません")
+            raise RuntimeError("controller not found")
 
         servo = handle_STS3215(port)
         servo.setup(servo_ids)
 
         calibrated = servo.load_calibration(servo_ids)
-        print("校正済み" if calibrated else "未校正です")
-        print("校正姿勢に合わせて、△ボタンを押してください")
+        if calibrated:
+            print("calibrated. load initial position & set user zero if press △")
+        else:
+            if reference_q is None or directions is None:
+                raise ValueError("set reference_q and directions")
+            user_zero.validate_model_q(reference_q)
+            print("set initial position & press △. follow the picture")
 
-        # 起動時から押されている場合は、いったん離してから受け付ける
         previous_button = bool(controller.read().tri_button)
 
         while True:
             inputs = controller.read()
             current_button = bool(inputs.tri_button)
-
-            # 押した瞬間だけ校正する
-            if current_button and not previous_button:
-                calibrated = False
-
-                servo.calibrate_and_save(
-                    servo_ids,
-                    reference_q,
-                    directions,
-                )
-
-                calibrated = True
-                print("校正値を保存しました")
-
+            pressed = current_button and not previous_button
             previous_button = current_button
+
+            if pressed:
+                if not calibrated:
+                    servo.calibrate_and_save(servo_ids,reference_q,directions)
+                    calibrated = True
+                    print("save initial calibration")
+
+                positions = servo.read_positions(servo_ids)
+                current_q = servo.toAngle(servo_ids, positions)
+                user_zero.reset(current_q)
+                print("set user zero : current position")
 
             if calibrated:
                 positions = servo.read_positions(servo_ids)
                 current_q = servo.toAngle(servo_ids, positions)
-
-                print("関節角度 [rad]:", current_q)
-                # IKには、このcurrent_qをseedとして渡す
-                # result = arm.solve_position_IK(target, current_q)
+                user_q = user_zero.to_user(current_q)
+                print("user angle [rad] : ",user_q)
+                # IKにはユーザー角度ではなくcurrent_qを渡す
+                # result = arm.solve_position_IK(target, seed=current_q)
 
             time.sleep(0.05)
 
     except KeyboardInterrupt:
         pass
     finally:
-        if servo is not None:
-            servo.close()
-        controller.close()
+        try:
+            if servo is not None:
+                servo.close()
+        finally:
+            controller.close()
 
+class UserZero:
+    def __init__(self, arm):
+        self.arm = arm
+        self.offset = np.zeros(arm.dof)
 
+    def validate_model_q(self, q):
+        q = self.arm.validate_q(q)
+
+        if np.any(q < self.arm.q_min) or np.any(q > self.arm.q_max):
+            raise ValueError("out of URDF range")
+
+        return q
+
+    def reset(self, current_q):
+        self.offset = self.validate_model_q(current_q).copy()
+
+    def to_user(self, model_q):
+        return self.validate_model_q(model_q) - self.offset
+
+    def to_model(self, user_q):
+        model_q = self.arm.validate_q(user_q) + self.offset
+        return self.validate_model_q(model_q)
+
+    def user_limits(self):
+        return (self.arm.q_min - self.offset,self.arm.q_max - self.offset,)
 
 if __name__ == "__main__":
     run(port=PORT,
