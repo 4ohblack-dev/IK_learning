@@ -120,6 +120,76 @@ def run(port, servo_ids, reference_q, directions):
         finally:
             controller.close()
 
+
+def move_to_xyz(arm,servo,servo_ids,target,speed=200,acc=10,):
+    servo_ids = tuple(servo_ids)
+    if len(servo_ids) != arm.dof:
+        raise ValueError("the number error")
+    if len(set(servo_ids)) != len(servo_ids):
+        raise ValueError("servo_ids must be identical")
+    target = arm.validate_vector(target,3,"target")
+    current_positions = servo.read_positions(servo_ids)
+    current_q = servo.toAngle(servo_ids,current_positions)
+    if np.any(current_q < arm.q_min) or np.any(current_q > arm.q_max):
+        raise ValueError("current angle is out of range")
+
+
+    result = arm.solve_position_IK(target=target,seed=current_q)
+    if not result["success"]:
+        raise ValueError(f"IK unsuccessed. err : {result['error']:.6f} m")
+
+    target_positions = servo.toPosition(servo_ids,result["q"],arm.q_min,arm.q_max)
+
+    for servo_id,position in zip(servo_ids,target_positions):
+        success = servo.st3215.MoveTo(servo_id,position,speed=speed,acc=acc,wait=False)
+        if success is not True:
+            raise ConnectionError(f"moving ID {servo_id} is failed")
+    return result
+
+def enable_position_control(servo,servo_ids):
+    positions = servo.read_positions(servo_ids)
+    for servo_id,position in zip(servo_ids,positions):
+        comm, error = servo.st3215.SetMode(servo_id,0)
+        if comm != 0 or error != 0:
+            raise ConnectionError(f"setting ID {servo_id} is failed")
+        if servo.st3215.WritePosition(servo_id,position) is not True:
+            raise ConnectionError(f"setting static angle to ID {servo_id} is failed")
+    for servo_id in servo_ids:
+        comm, error = servo.st3215.StartServo(servo_id)
+        if comm != 0 or error != 0:
+            raise ConnectionError(f"ID {servo_id} : failed to start servo")
+
+def coordinate_input_loop(arm,servo,servo_ids):
+    while True:
+        text = input("xyz > ").strip()
+        if text.lower() == "q":
+            return
+
+        try:
+            target = np.array([float(value) for value in text.split()],dtype=float,)
+            result = move_to_xyz(arm,servo,servo_ids,target,)
+        except ValueError as e:
+            print(e)
+            continue
+        print("send messages")
+        deadline = time.monotonic() + 30.0
+        while True:
+            moving = [servo.st3215.IsMoving(servo_id) for servo_id in servo_ids]
+            if any(value is None for value in moving):
+                raise ConnectionError("can't get status")
+            if not any(moving):
+                break
+            if time.monotonic() >= deadline:
+                raise TimeoutError("can't get if it finish")
+            time.sleep(0.05)
+
+        actual_positions = servo.read_positions(servo_ids)
+        actual_q = servo.toAngle(servo_ids,actual_positions)
+        actual_xyz = arm.position(actual_q)
+
+        print("実測モデル位置 [m]:", actual_xyz)
+        print("目標との距離 [m]:", np.linalg.norm(target - actual_xyz))
+
 class UserZero:
     def __init__(self, arm):
         self.arm = arm

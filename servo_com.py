@@ -134,6 +134,26 @@ class handle_STS3215:
             raise ValueError("the number error")
         if not all(np.all(np.isfinite(v)) for v in (q, q_min, q_max)):
             raise ValueError("invalid values")
+        if np.any(q_min > q_max):
+            raise ValueError("wrong range")
+        if np.any(q<q_min) or np.any(q>q_max):
+            raise ValueError("target-angle is out of range")
+
+        positions = []
+
+        for servo_id, angle in zip(servo_ids,q):
+            zero = self.zero_positions[servo_id]
+            direction = self.directions[servo_id]
+            if not np.isfinite(zero) or direction not in (-1,1):
+                raise ValueError(f"({servo_id})'s calibration data is wrong")
+            
+            position = round(zero + direction*angle*4096/(2*np.pi))
+            if not 0<=position<=4095:
+                raise ValueError(f"{servo_id}: target angle is out of range")
+            
+            positions.append(position)
+        return positions
+
     def close(self):
         if self.st3215.portHandler.is_open:
             self.st3215.portHandler.closePort()
