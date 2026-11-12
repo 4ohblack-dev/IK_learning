@@ -1,4 +1,5 @@
 import numpy as np
+from numpy.typing import NDArray
 
 from controller_input import Controller
 from mathmetics import ArmKinematics, Joint
@@ -49,6 +50,8 @@ MoveTo()で各サーボへ目標を送信
 '''
 
 import time
+from queue import Empty, Queue
+from threading import Event, Thread
 
 from controller_input import Controller
 from servo_com import handle_STS3215
@@ -65,6 +68,18 @@ def run(port, servo_ids, reference_q, directions):
         raise ValueError("servo_ids error : unmatch with arm.dof")
     controller = Controller()
     servo = None
+    targets: Queue[NDArray[np.float64] | None] = Queue(maxsize=1)
+    input_ready = Event()
+    input_stop = Event()
+    input_thread = None
+    moving_target: NDArray[np.float64] | None = None
+    deadline = 0.0
+    enabled = False
+    motion_started = False
+
+    def mark_motion_started():
+        nonlocal motion_started
+        motion_started = True
 
     try:
         if not controller.getController():
@@ -83,6 +98,9 @@ def run(port, servo_ids, reference_q, directions):
             print("set initial position & press △. follow the picture")
 
         previous_button = bool(controller.read().tri_button)
+        print("目標位置はベース基準の x y z [m]。対象点は最終リンクの原点です。")
+        print("△: 初期校正 / ユーザーゼロ設定。終了: Ctrl+C または q")
+        print("ユーザーゼロを変更しても、目標座標の原点は変わりません。")
 
         while True:
             inputs = controller.read()
@@ -91,37 +109,94 @@ def run(port, servo_ids, reference_q, directions):
             previous_button = current_button
 
             if pressed:
-                if not calibrated:
-                    servo.calibrate_and_save(servo_ids,reference_q,directions)
-                    calibrated = True
-                    print("save initial calibration")
+                if moving_target is not None:
+                    print("移動中です。停止後にもう一度△を押してください")
+                else:
+                    if not calibrated:
+                        servo.calibrate_and_save(servo_ids,reference_q,directions)
+                        calibrated = True
+                        print("save initial calibration")
 
-                positions = servo.read_positions(servo_ids)
-                current_q = servo.toAngle(servo_ids, positions)
-                user_zero.reset(current_q)
-                print("set user zero : current position")
+                    positions = servo.read_positions(servo_ids)
+                    current_q = servo.toAngle(servo_ids, positions)
+                    user_zero.reset(current_q)
+                    print("set user zero : current position")
 
-            if calibrated:
-                positions = servo.read_positions(servo_ids)
-                current_q = servo.toAngle(servo_ids, positions)
-                user_q = user_zero.to_user(current_q)
-                print("user angle [rad] : ",user_q)
-                # IKにはユーザー角度ではなくcurrent_qを渡す
-                # result = arm.solve_position_IK(target, seed=current_q)
+            if calibrated and input_thread is None:
+                # input()だけを別スレッドへ分離。機器操作はrun()で行う。
+                input_ready.set()
+                input_thread = Thread(
+                    target=coordinate_input_loop,
+                    args=(targets, input_ready, input_stop),
+                    daemon=True,
+                )
+                input_thread.start()
+
+            if moving_target is not None:
+                moving = [servo.st3215.IsMoving(servo_id) for servo_id in servo_ids]
+                if any(value is None for value in moving):
+                    raise ConnectionError("can't get status")
+                if not any(moving):
+                    actual_q = servo.toAngle(servo_ids, servo.read_positions(servo_ids))
+                    actual_xyz = arm.position(actual_q)
+                    print("実測モデル位置 [m]:", actual_xyz)
+                    print("目標との距離 [m]:", np.linalg.norm(moving_target - actual_xyz))
+                    print("ユーザー角度 [rad]:", user_zero.to_user(actual_q))
+                    moving_target = None
+                    input_ready.set()
+                elif time.monotonic() >= deadline:
+                    raise TimeoutError("移動完了を確認できませんでした")
+            elif calibrated:
+                try:
+                    target = targets.get_nowait()
+                except Empty:
+                    time.sleep(0.05)
+                    continue
+                if target is None:
+                    break
+                if not isinstance(target, str):
+                    try:
+                        # 全目標の検証後、初回の移動時だけ保持を有効化する。
+                        move_to_xyz(
+                            arm, servo, servo_ids, target,
+                            enable_before_move=not enabled,
+                            before_send=mark_motion_started,
+                        )
+                        enabled = True
+                        moving_target = target
+                        deadline = time.monotonic() + 30.0
+                        print("移動指令を送信しました")
+                    except ValueError as error:
+                        print(error)
+                        input_ready.set()
 
             time.sleep(0.05)
 
     except KeyboardInterrupt:
         pass
     finally:
+        input_stop.set()
+        input_ready.set()
         try:
             if servo is not None:
-                servo.close()
+                try:
+                    if motion_started:
+                        # 通信を閉じるだけでは動作は停止しないため、現在位置を目標にする。
+                        # トルク解除は自重落下を招くため、ここでは行わない。
+                        for servo_id in servo_ids:
+                            try:
+                                position = servo.st3215.ReadPosition(servo_id)
+                                if position is None or servo.st3215.WritePosition(servo_id, position) is not True:
+                                    raise ConnectionError("hold failed")
+                            except Exception as error:
+                                print(f"ID {servo_id}: 保持を確認できません: {error}")
+                finally:
+                    servo.close()
         finally:
             controller.close()
 
 
-def move_to_xyz(arm,servo,servo_ids,target,speed=200,acc=10,):
+def move_to_xyz(arm,servo,servo_ids,target,speed=200,acc=10,enable_before_move=False,before_send=None):
     servo_ids = tuple(servo_ids)
     if len(servo_ids) != arm.dof:
         raise ValueError("the number error")
@@ -139,6 +214,11 @@ def move_to_xyz(arm,servo,servo_ids,target,speed=200,acc=10,):
         raise ValueError(f"IK unsuccessed. err : {result['error']:.6f} m")
 
     target_positions = servo.toPosition(servo_ids,result["q"],arm.q_min,arm.q_max)
+
+    if before_send is not None:
+        before_send()
+    if enable_before_move:
+        enable_position_control(servo, servo_ids)
 
     for servo_id,position in zip(servo_ids,target_positions):
         success = servo.st3215.MoveTo(servo_id,position,speed=speed,acc=acc,wait=False)
@@ -159,36 +239,35 @@ def enable_position_control(servo,servo_ids):
         if comm != 0 or error != 0:
             raise ConnectionError(f"ID {servo_id} : failed to start servo")
 
-def coordinate_input_loop(arm,servo,servo_ids):
-    while True:
-        text = input("xyz > ").strip()
-        if text.lower() == "q":
+def coordinate_input_loop(
+    targets: Queue[NDArray[np.float64] | None],
+    input_ready: Event,
+    input_stop: Event,
+):
+    """目標座標の入力だけを担当し、サーボにはアクセスしない。"""
+    while not input_stop.is_set():
+        input_ready.wait()
+        if input_stop.is_set():
             return
-
+        input_ready.clear()
         try:
-            target = np.array([float(value) for value in text.split()],dtype=float,)
-            result = move_to_xyz(arm,servo,servo_ids,target,)
-        except ValueError as e:
-            print(e)
+            text = input("xyz [m] > ").strip()
+        except EOFError:
+            text = "q"
+        if input_stop.is_set():
+            return
+        if text.lower() == "q":
+            targets.put(None)
+            return
+        try:
+            target = np.array([float(value) for value in text.split()], dtype=float)
+            if target.shape != (3,) or not np.isfinite(target).all():
+                raise ValueError("有限の数値を3個、x y z の順に入力してください")
+        except ValueError as error:
+            print(error)
+            input_ready.set()
             continue
-        print("send messages")
-        deadline = time.monotonic() + 30.0
-        while True:
-            moving = [servo.st3215.IsMoving(servo_id) for servo_id in servo_ids]
-            if any(value is None for value in moving):
-                raise ConnectionError("can't get status")
-            if not any(moving):
-                break
-            if time.monotonic() >= deadline:
-                raise TimeoutError("can't get if it finish")
-            time.sleep(0.05)
-
-        actual_positions = servo.read_positions(servo_ids)
-        actual_q = servo.toAngle(servo_ids,actual_positions)
-        actual_xyz = arm.position(actual_q)
-
-        print("実測モデル位置 [m]:", actual_xyz)
-        print("目標との距離 [m]:", np.linalg.norm(target - actual_xyz))
+        targets.put(target)
 
 class UserZero:
     def __init__(self, arm):
