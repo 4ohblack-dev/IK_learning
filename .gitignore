@@ -1,0 +1,16 @@
+# External repositories cloned locally
+/SO-ARM100/
+/python-st3215/
+
+# Python generated files and local environments
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# PlatformIO build output
+.pio/
