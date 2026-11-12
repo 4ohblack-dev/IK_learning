@@ -6,65 +6,99 @@ def deadzone(v,threshold=0.05):
     return 0 if abs(v) < threshold else v
 @dataclass
 class Input:
-
+    leftX : float=0.0
+    leftY : float=0.0
+    rightY : float=0.0
+    rightX : float=0.0
+    rotL : float=0.0
+    rotR : float=0.0
+    L_button : int = 0
+    R_button : int = 0
+    up_button : int = 0
+    down_button : int = 0
+    left_button : int = 0
+    right_button : int = 0
+    cross_button : int = 0
+    circle_button : int = 0
+    tri_button : int = 0
+    rec_button : int = 0
 class Controller(object):
 
     def __init__(self):
         self.isConnect = False
+        self.joy = None
 
-    def getController(self):
-        if self.isConnect == True:
-            self.isConnect = False
-        
+    def getController(self)-> bool:
+        self.isConnect = False
         pygame.init()
         pygame.joystick.init()
         count = pygame.joystick.get_count()
         if count == 0:
-            raise ValueError("Controller not found")
+            return False
 
-        self.isConnect = True
- 
-def main():
-    pygame.init()
-    pygame.joystick.init()
+        self.joy = pygame.joystick.Joystick(0)
+        self.joy.init()
+        self.isConnect=True
+        return True
 
-    count = pygame.joystick.get_count()
+    def read(self)->Input:
+        if self.joy==None or self.isConnect==False:
+            raise ValueError("controller not found")
 
-    if count == 0:
-        print("Controller not found")
-        exit()
-
-    joy = pygame.joystick.Joystick(0)
-    joy.init()
-
-    print("Name:",joy.get_name())
-    print("Buttons:",joy.get_numbuttons())
-    print("Axes:",joy.get_numaxes())
-
-    while True:
         for event in pygame.event.get():
-            print(event)
+            if event.type == pygame.JOYDEVICEREMOVED:
+                if event.instance_id == self.joy.get_instance_id():
+                    self.isConnect = False
+                    raise ValueError("controller removed")
 
-        leftX = deadzone(joy.get_axis(0))
-        leftY = deadzone(joy.get_axis(1))
-        rightX = deadzone(joy.get_axis(3))
-        rightY = deadzone(joy.get_axis(4))
-        rotL = deadzone(joy.get_axis(2))
-        rotR = deadzone(joy.get_axis(5))
+        return Input(
+            leftX = deadzone(self.joy.get_axis(0)),
+            leftY = deadzone(self.joy.get_axis(1)),
+            rightX = deadzone(self.joy.get_axis(2)),
+            rightY = deadzone(self.joy.get_axis(3)),
+            rotL = deadzone(self.joy.get_axis(4)),
+            rotR = deadzone(self.joy.get_axis(5)),
+            L_button = self.joy.get_button(9),
+            R_button = self.joy.get_button(10),
+            up_button = self.joy.get_button(11),
+            down_button = self.joy.get_button(12),
+            left_button = self.joy.get_button(13),
+            right_button = self.joy.get_button(14),
+            cross_button = self.joy.get_button(0),
+            circle_button = self.joy.get_button(1),
+            tri_button = self.joy.get_button(3),
+            rec_button = self.joy.get_button(2),        
+        )
 
-        print(leftX)
-        print(leftY)
-        print(rotL)
 
-        time.sleep(0.01)
+    def close(self):
+        if self.joy is not None:
+            self.joy.quit()
+            self.joy = None
 
+        self.isConnect = False
+        pygame.quit()
 
-#左     横：axes 0、縦：axes 1、ボタン：axes 2、L：button 4
-#右     横：axes 3、縦：axes 4、ボタン：axes 5、R：button 5
-#右十字 下から反時計回りに　button 0~3
-#左十字 返り値が(,)で、正の方向が１、負の方向が‐1
-#share : button 8
-# options : button 9
+        
+def main():
+    controller = Controller()
+
+    try:
+        if not controller.getController():
+            print("controller not found")
+            return
+
+        while True:
+            inputs = controller.read()
+            print(inputs)
+            time.sleep(0.05)
+
+    except KeyboardInterrupt:
+        pass
+    except (ValueError, pygame.error) as error:
+        print(error)
+    finally:
+        controller.close()
 
 if __name__ == "__main__":
     main()
