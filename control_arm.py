@@ -56,7 +56,7 @@ from threading import Event, Thread
 from controller_input import Controller
 from servo_com import handle_STS3215
 
-PORT = "COM7"
+PORT = "COM6"
 SERVO_IDS = [1, 2, 3, 4, 5]
 REFERENCE_Q = [0.0, 0.0, 0.0, 0.0, 0.0]
 DIRECTIONS = [1,1,1,1,1]

@@ -23,6 +23,25 @@ class Input:
     circle_button : int = 0
     tri_button : int = 0
     rec_button : int = 0
+
+@dataclass
+class ControlData:
+    d_leftX : float=0.0
+    d_leftY : float=0.0
+    d_rightY : float=0.0
+    d_rightX : float=0.0
+    d_rotL : float=0.0
+    d_rotR : float=0.0
+    d_L_button : int = 0
+    d_R_button : int = 0
+    d_up_button : int = 0
+    d_down_button : int = 0
+    d_left_button : int = 0
+    d_right_button : int = 0
+    d_cross_button : int = 0
+    d_circle_button : int = 0
+    d_tri_button : int = 0
+    d_rec_button : int = 0
 class Controller(object):
 
     def __init__(self):
@@ -71,7 +90,27 @@ class Controller(object):
             rec_button = self.joy.get_button(2),        
         )
 
+    def inputToDelta(self)->ControlData:
+        input = self.read()
 
+        return ControlData(
+            d_leftX = 0.1*input.leftX,
+            d_leftY = 0.1*input.leftY,
+            d_rightX = 0.1*input.rightX,
+            d_rightY = 0.1*input.rightY,
+            d_rotL = 0.1*input.rotL,
+            d_rotR = 0.1*input.rotR,
+            d_L_button = input.L_button,
+            d_R_button = input.R_button,
+            d_up_button = input.up_button,
+            d_down_button = input.down_button,
+            d_left_button = input.left_button,
+            d_right_button = input.right_button,
+            d_cross_button = input.cross_button,
+            d_circle_button = input.circle_button,
+            d_tri_button = input.tri_button,
+            d_rec_button = input.rec_button,     
+        )
     def close(self):
         if self.joy is not None:
             self.joy.quit()
