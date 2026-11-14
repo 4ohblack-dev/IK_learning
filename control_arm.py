@@ -50,6 +50,8 @@ def run(port, servo_ids, reference_q, directions):
     input_stop = Event()
     input_thread = None
     moving_target: NDArray[np.float64] | None = None
+    moving_pose_q: NDArray[np.float64] | None = None
+    pose_tolerance = np.deg2rad(2.0)  # 到着判定の仮の許容差：各軸2度
     deadline = 0.0
     enabled = False
     motion_started = False
@@ -82,11 +84,13 @@ def run(port, servo_ids, reference_q, directions):
 
         record_path = Path(__file__).resolve().parent / "recorded_poses.jsonl"
         previous_rec_button = bool(controller.read().rec_button)
+        previous_cir_button = bool(controller.read().circle_button)
 
         while True:
             inputs = controller.read()
             current_rec_button = bool(inputs.rec_button)
             rec_pressed = current_rec_button and not previous_rec_button
+            previous_rec_button = current_rec_button
             if rec_pressed:
                 if not calibrated:
                     print("press △ first")
@@ -107,14 +111,51 @@ def run(port, servo_ids, reference_q, directions):
                         print(f"failed to get position: {error}")
                     else:
                         print("success to save position")
+
+            
+            current_cir_button = bool(inputs.circle_button)
+            cir_pressed = current_cir_button and not previous_cir_button
+            previous_cir_button = current_cir_button
+            if cir_pressed:
+                if not calibrated:
+                    print("press △ first")
+                elif not record_path.exists():
+                    print("no saved points")
+                elif moving_target is not None or moving_pose_q is not None:
+                    print("press after finishing moving")
+                else:
+                    try:
+                        current_positions = servo.read_positions(servo_ids)
+                        current_q = servo.toAngle(servo_ids,current_positions)
+                        poses = []
+                        with record_path.open("r",encoding="utf-8") as file:
+                            for line_number, line in enumerate(file,start=1):
+                                if not line.strip():
+                                    continue
+                                try:
+                                    poses.append(json.loads(line))
+                                except (OSError,ValueError) as error:
+                                    raise ValueError(f"line {line_number} : data is broken") from error
+                        if not poses:
+                            raise ValueError("no position data")
+                        moving_pose_q = move_to_pose(arm, servo, servo_ids, poses[-1])
+                        enabled = True
+                        deadline = time.monotonic() + 30.0
+                    except ConnectionError:
+                        raise
+                    except (OSError,ValueError) as e:
+                        print(f"failed to move to saved position: {e}")
+                    else:
+                        print("move to saved position")
+
                     
-            previous_rec_button = current_rec_button
+
             current_button = bool(inputs.tri_button)
             pressed = current_button and not previous_button
             previous_button = current_button
 
             if pressed:
-                if moving_target is not None:
+                if moving_target is not None or moving_pose_q is not None:
                     print("移動中です。停止後にもう一度△を押してください")
                 else:
                     if not calibrated:
@@ -137,7 +178,23 @@ def run(port, servo_ids, reference_q, directions):
                 )
                 input_thread.start()
 
-            if moving_target is not None:
+            if moving_pose_q is not None:
+                moving = [servo.st3215.IsMoving(servo_id) for servo_id in servo_ids]
+                if any(value is None for value in moving):
+                    raise ConnectionError("can't get status")
+                reached = False
+                if not any(moving):
+                    actual_q = servo.toAngle(servo_ids, servo.read_positions(servo_ids))
+                    actual_xyz = arm.position(actual_q)
+                    angle_error = np.abs(actual_q - moving_pose_q)
+                    reached = bool(np.all(angle_error <= pose_tolerance))
+                if reached:
+                    moving_pose_q = None
+                    input_ready.set()
+                elif time.monotonic() >= deadline:
+                    raise TimeoutError("移動完了を確認できませんでした")
+                
+            elif moving_target is not None:
                 moving = [servo.st3215.IsMoving(servo_id) for servo_id in servo_ids]
                 if any(value is None for value in moving):
                     raise ConnectionError("can't get status")
@@ -145,7 +202,7 @@ def run(port, servo_ids, reference_q, directions):
                     actual_q = servo.toAngle(servo_ids, servo.read_positions(servo_ids))
                     actual_xyz = arm.position(actual_q)
                     print("実測モデル位置 [m]:", actual_xyz)
-                    print("目標との距離 [m]:", np.linalg.norm(moving_target - actual_xyz))
+                    print("目標との距離 [m]:",np.linalg.norm(moving_target - actual_xyz),)
                     print("ユーザー角度 [rad]:", user_zero.to_user(actual_q))
                     moving_target = None
                     input_ready.set()
@@ -235,6 +292,23 @@ def move_to_xyz(arm,servo,servo_ids,target,speed=200,acc=10,enable_before_move=F
         if success is not True:
             raise ConnectionError(f"moving ID {servo_id} is failed")
     return result
+
+def move_to_pose(arm, servo, servo_ids, pose, speed=200, acc=10):
+    servo_ids = list(servo_ids)
+    if not isinstance(pose,dict):
+        raise ValueError("pose must be dict")
+    if pose.get("joint_angles_rad") is None or pose.get("servo_ids") is None:
+            raise ValueError("data fomat is incorrect")
+    if pose["servo_ids"] != servo_ids:
+        raise ValueError("servoIds don't match with data")
+    q = arm.validate_q(pose["joint_angles_rad"])
+    positions = servo.toPosition(servo_ids,q,arm.q_min,arm.q_max)
+    enable_position_control(servo,servo_ids)
+    for servo_id, position in zip(servo_ids,positions):
+        success = servo.st3215.MoveTo(servo_id,position,speed=speed,acc=acc,wait=False)
+        if success is not True:
+            raise ConnectionError(f"ID {servo_id} : failed to move")
+    return q.copy()
 
 def enable_position_control(servo,servo_ids):
     positions = servo.read_positions(servo_ids)
