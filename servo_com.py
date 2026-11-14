@@ -9,6 +9,7 @@ if str(ST3215_SOURCE) not in sys.path:
 
 from st3215 import ST3215
 from st3215.port_handler import PortHandler
+from st3215.values import STS_TORQUE_ENABLE
 
 '''
 通信を開く
@@ -154,6 +155,19 @@ class handle_STS3215:
             positions.append(position)
         return positions
 
+    def release_torque(self, servo_ids):
+        failures = []
+        for servo_id in servo_ids:
+            try:
+                self.st3215.StopServo(servo_id)
+                state = self.st3215.read1ByteTxRx(servo_id, STS_TORQUE_ENABLE)
+                if state != (0, 0, 0):
+                    raise ConnectionError(f"torque readback={state}")
+            except Exception as error:
+                failures.append(f"ID {servo_id}: {error}")
+        if failures:
+            raise ConnectionError("Torque OFF could not be verified: " + "; ".join(failures))
+
     def close(self):
         if self.st3215.portHandler.is_open:
             self.st3215.portHandler.closePort()
@@ -164,7 +178,7 @@ class handle_STS3215:
 
 def main():
     servo_ids = [1, 2, 3, 4, 5]
-    servo = handle_STS3215(port="COM7")
+    servo = handle_STS3215(port="COM9")
 
     try:
         servo.setup(servo_ids)

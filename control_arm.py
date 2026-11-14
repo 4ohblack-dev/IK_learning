@@ -56,7 +56,7 @@ from threading import Event, Thread
 from controller_input import Controller
 from servo_com import handle_STS3215
 
-PORT = "COM6"
+PORT = "COM9"
 SERVO_IDS = [1, 2, 3, 4, 5]
 REFERENCE_Q = [0.0, 0.0, 0.0, 0.0, 0.0]
 DIRECTIONS = [1,1,1,1,1]
@@ -98,8 +98,9 @@ def run(port, servo_ids, reference_q, directions):
             print("set initial position & press △. follow the picture")
 
         previous_button = bool(controller.read().tri_button)
-        print("目標位置はベース基準の x y z [m]。対象点は最終リンクの原点です。")
+        print("入力は現在位置からの移動量 dx dy dz [m]。対象点は最終リンクの原点です。")
         print("△: 初期校正 / ユーザーゼロ設定。終了: Ctrl+C または q")
+        print("終了時は全軸のトルクを解除します。終了前にアームを支えてください。")
         print("ユーザーゼロを変更しても、目標座標の原点は変わりません。")
 
         while True:
@@ -156,6 +157,20 @@ def run(port, servo_ids, reference_q, directions):
                     break
                 if not isinstance(target, str):
                     try:
+                        # 入力された移動量を、現在の手先位置を基準にした目標へ変換する。
+                        current_positions = servo.read_positions(servo_ids)
+                        current_q = servo.toAngle(servo_ids, current_positions)
+                        current_xyz = arm.position(current_q)
+                        input_delta = target
+                        relative_delta = np.array([
+                            -input_delta[1], -input_delta[0], -input_delta[2],
+                        ], dtype=float)
+                        target = current_xyz + relative_delta
+                        print("現在位置 [m]:", current_xyz)
+                        print("入力移動量 dx dy dz [m]:", input_delta)
+                        print("移動量 [m]:", relative_delta)
+                        print("絶対目標 [m]:", target)
+
                         # 全目標の検証後、初回の移動時だけ保持を有効化する。
                         move_to_xyz(
                             arm, servo, servo_ids, target,
@@ -180,16 +195,7 @@ def run(port, servo_ids, reference_q, directions):
         try:
             if servo is not None:
                 try:
-                    if motion_started:
-                        # 通信を閉じるだけでは動作は停止しないため、現在位置を目標にする。
-                        # トルク解除は自重落下を招くため、ここでは行わない。
-                        for servo_id in servo_ids:
-                            try:
-                                position = servo.st3215.ReadPosition(servo_id)
-                                if position is None or servo.st3215.WritePosition(servo_id, position) is not True:
-                                    raise ConnectionError("hold failed")
-                            except Exception as error:
-                                print(f"ID {servo_id}: 保持を確認できません: {error}")
+                    servo.release_torque(servo_ids)
                 finally:
                     servo.close()
         finally:
@@ -251,7 +257,7 @@ def coordinate_input_loop(
             return
         input_ready.clear()
         try:
-            text = input("xyz [m] > ").strip()
+            text = input("移動量 dx dy dz [m] > ").strip()
         except EOFError:
             text = "q"
         if input_stop.is_set():
