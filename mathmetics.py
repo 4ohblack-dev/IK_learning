@@ -47,7 +47,7 @@ class Joint:
     upper: float
 
 class ArmKinematics:
-    def __init__(self,urdf_path=URDF,joint_names=ARM_NAMES,base_link="base",tcp_xyz=(0.0,0.0,0.0)):
+    def __init__(self,urdf_path=URDF,joint_names=ARM_NAMES,base_link="base",tcp_xyz=(0.0,0.05,0.0)):
         self.urdf_path = Path(urdf_path)
         self.joint_names = tuple(joint_names)
         self.base_link = base_link
