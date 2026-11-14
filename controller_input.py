@@ -1,6 +1,5 @@
 import time
 from dataclasses import dataclass
-
 import pygame
 
 def deadzone(v,threshold=0.05):

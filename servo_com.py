@@ -184,7 +184,7 @@ class handle_STS3215:
 
 def main():
     servo_ids = [1, 2, 3, 4, 5]
-    servo = handle_STS3215(port="COM7")
+    servo = handle_STS3215(port="COM9")
 
     try:
         servo.setup(servo_ids)
