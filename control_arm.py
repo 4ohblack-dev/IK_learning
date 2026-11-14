@@ -32,7 +32,7 @@ from servo_com import handle_STS3215
 PORT = "COM9"
 SERVO_IDS = [1, 2, 3, 4, 5]
 REFERENCE_Q = [0.0, 0.0, 0.0, 0.0, 0.0]
-DIRECTIONS = [1,1,1,1,1]
+DIRECTIONS = [1,-1,-1,1,1]
 CONTROLLER_STEP_M = 0.002  # 各軸の最大移動量 [m/指令]
 
 def run(port, servo_ids, reference_q, directions):
@@ -68,7 +68,8 @@ def run(port, servo_ids, reference_q, directions):
             print("set initial position & press △. follow the picture")
 
         previous_button = bool(controller.read().tri_button)
-        print("目標位置はベース基準の x y z [m]。対象点は最終リンクの原点です。")
+        print("左スティック: 横→-Y、縦→X。右スティック上下: Z。")
+        print("終了時は全軸のトルクを解除します。終了前にアームを支えてください。")
         print("△: 初期校正 / ユーザーゼロ設定。終了: Ctrl+C")
         print("ユーザーゼロを変更しても、目標座標の原点は変わりません。")
 
@@ -109,8 +110,9 @@ def run(port, servo_ids, reference_q, directions):
                     raise TimeoutError("移動完了を確認できませんでした")
             elif calibrated:
                 # read()済みの入力を使い、現在の手先位置から相対移動する。
+                # 実機確認結果に合わせ、入力X/Yを入れ替えて符号を補正する。
                 direction = np.array([
-                    inputs.leftX, -inputs.leftY, -inputs.rightY,
+                    inputs.leftY, -inputs.leftX, inputs.rightY,
                 ], dtype=float)
                 if np.any(direction):
                     try:
@@ -138,16 +140,7 @@ def run(port, servo_ids, reference_q, directions):
         try:
             if servo is not None:
                 try:
-                    if motion_started:
-                        # 通信を閉じるだけでは動作は停止しないため、現在位置を目標にする。
-                        # トルク解除は自重落下を招くため、ここでは行わない。
-                        for servo_id in servo_ids:
-                            try:
-                                position = servo.st3215.ReadPosition(servo_id)
-                                if position is None or servo.st3215.WritePosition(servo_id, position) is not True:
-                                    raise ConnectionError("hold failed")
-                            except Exception as error:
-                                print(f"ID {servo_id}: 保持を確認できません: {error}")
+                    servo.release_torque(servo_ids)
                 finally:
                     servo.close()
         finally:
