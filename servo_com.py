@@ -120,7 +120,9 @@ class handle_STS3215:
         for servo_id,position in zip(servo_ids,positions):
             zero = self.zero_positions[servo_id]
             direction = self.directions[servo_id]
-            radians = direction*(position - zero)*(2*np.pi/4096)
+            # 単回転エンコーダーの4095 -> 0の境界を跨いでも角度を連続にする。
+            delta = (position - zero + 2048) % 4096 - 2048
+            radians = direction*delta*(2*np.pi/4096)
             q.append(radians)
         return np.array(q,dtype=float)
 
@@ -149,7 +151,11 @@ class handle_STS3215:
             
             position = round(zero + direction*angle*4096/(2*np.pi))
             if not 0<=position<=4095:
-                raise ValueError(f"{servo_id}: target angle is out of range")
+                raise ValueError(
+                    f"ID {servo_id}: target encoder position {position} is outside 0..4095 "
+                    f"(calibration zero={zero:.1f}). Encoder boundary reached; "
+                    "servo centering and recalibration are required. No wraparound command sent."
+                )
             
             positions.append(position)
         return positions

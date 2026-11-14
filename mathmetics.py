@@ -174,8 +174,6 @@ class ArmKinematics:
     def solve_position_IK(self,target, seed,tol=0.002, max_iter=300,damping=0.04, max_step=0.10):
         target = self.validate_vector(target,3,"target")
         q = self.validate_vector(seed,self.dof,"seed")
-        if target.shape != (3,) or seed.shape != (5,):
-            raise ValueError("target must be 3D and seed must be 5D")
         if np.any(q < self.q_min) or np.any(q > self.q_max):
             raise ValueError("seed is outside joint limits")
 

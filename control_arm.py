@@ -29,7 +29,7 @@ import time
 from controller_input import Controller
 from servo_com import handle_STS3215
 
-PORT = "COM6"
+PORT = "COM9"
 SERVO_IDS = [1, 2, 3, 4, 5]
 REFERENCE_Q = [0.0, 0.0, 0.0, 0.0, 0.0]
 DIRECTIONS = [1,1,1,1,1]
@@ -164,7 +164,17 @@ def move_to_xyz(arm,servo,servo_ids,target,speed=200,acc=10,enable_before_move=F
     current_positions = servo.read_positions(servo_ids)
     current_q = servo.toAngle(servo_ids,current_positions)
     if np.any(current_q < arm.q_min) or np.any(current_q > arm.q_max):
-        raise ValueError("current angle is out of range")
+        details = []
+        for i, servo_id in enumerate(servo_ids):
+            if current_q[i] < arm.q_min[i] or current_q[i] > arm.q_max[i]:
+                details.append(
+                    f"ID {servo_id} ({arm.joint_names[i]}): "
+                    f"{np.degrees(current_q[i]):.2f} deg, "
+                    f"limits [{np.degrees(arm.q_min[i]):.2f}, "
+                    f"{np.degrees(arm.q_max[i]):.2f}] deg, "
+                    f"raw={current_positions[i]}, zero={servo.zero_positions[servo_id]:.1f}"
+                )
+        raise ValueError("current angle is out of range: " + "; ".join(details))
 
 
     result = arm.solve_position_IK(target=target,seed=current_q)
