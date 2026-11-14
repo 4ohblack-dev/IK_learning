@@ -1,34 +1,11 @@
 import numpy as np
 from numpy.typing import NDArray
-
+from pathlib import Path
 from controller_input import Controller
 from mathmetics import ArmKinematics, Joint
 from servo_com import ST3215
-
-
-'''
-初期状態の決定
-pingservo(id)でservoがあるかチェック
-listservos()→5個独立にあるかチェック
-stopservo(id)→あるなら確実に止めておく
-setmode(id,mode)→適切なモードに設定
-setacc(id,acc)→適切に設定
-setspeed(id,speed)→適切に設定
-startservo(id)→サーボが使えるようにする
-definemiddle(id)
-
-今の状態を把握
-readstatus→angle:返ってくる配列[4]
-↓
-目標位置の入力
-angle→qに代入
-solve_position_IK
-返ってきたものの"q"が角度出力
-↓
-servoへの出力
-moveto→(id,position),speed,accもいじれる
-'''
-
+import json
+from datetime import datetime
 '''
 通信を開く
 ↓
@@ -59,7 +36,7 @@ from servo_com import handle_STS3215
 PORT = "COM9"
 SERVO_IDS = [1, 2, 3, 4, 5]
 REFERENCE_Q = [0.0, 0.0, 0.0, 0.0, 0.0]
-DIRECTIONS = [1,1,1,1,1]
+DIRECTIONS = [1,-1,-1,1,1]
 
 def run(port, servo_ids, reference_q, directions):
     arm = ArmKinematics(base_link="base_link")
@@ -103,8 +80,35 @@ def run(port, servo_ids, reference_q, directions):
         print("終了時は全軸のトルクを解除します。終了前にアームを支えてください。")
         print("ユーザーゼロを変更しても、目標座標の原点は変わりません。")
 
+        record_path = Path(__file__).resolve().parent / "recorded_poses.jsonl"
+        previous_rec_button = bool(controller.read().rec_button)
+
         while True:
             inputs = controller.read()
+            current_rec_button = bool(inputs.rec_button)
+            rec_pressed = current_rec_button and not previous_rec_button
+            if rec_pressed:
+                if not calibrated:
+                    print("press △ first")
+                else:
+                    try:
+                        positions = servo.read_positions(servo_ids)
+                        current_q = servo.toAngle(servo_ids,positions)
+                        pose = {
+                            "recorded_at": datetime.now().astimezone().isoformat(),
+                            "servo_ids": list(servo_ids),
+                            "positions": [int(p) for p in positions],
+                            "joint_angles_rad": current_q.tolist(),
+                        }
+                        line = json.dumps(pose, ensure_ascii=False, allow_nan=False)
+                        with record_path.open("a", encoding="utf-8") as file:
+                            file.write(line + "\n")
+                    except (OSError, ValueError) as error:
+                        print(f"failed to get position: {error}")
+                    else:
+                        print("success to save position")
+                    
+            previous_rec_button = current_rec_button
             current_button = bool(inputs.tri_button)
             pressed = current_button and not previous_button
             previous_button = current_button
