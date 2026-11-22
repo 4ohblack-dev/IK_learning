@@ -95,13 +95,23 @@ class ArmKinematics:
     def validate_q(self,q):
         return self.validate_vector(q,self.dof,"q")
 
+    @staticmethod
+    def joint_link(joint: ET.Element, tag: str) -> str:
+        element = joint.find(tag)
+        if element is None:
+            raise ValueError(f"missing {tag} at joint: {joint.get('name')}")
+        link = element.get("link")
+        if not link:
+            raise ValueError(f"missing {tag} link at joint: {joint.get('name')}")
+        return link
+
     def load_tcp_transform(self):
         """Resolve tool_tip through fixed joints from the last arm link."""
         root = ET.parse(self.urdf_path).getroot()
         joints = root.findall("joint")
         last_joint = next(j for j in joints if j.get("name") == self.joint_names[-1])
-        arm_tip = last_joint.find("child").attrib["link"]
-        by_child = {j.find("child").attrib["link"]: j for j in joints}
+        arm_tip = self.joint_link(last_joint, "child")
+        by_child = {self.joint_link(j, "child"): j for j in joints}
         link = "tool_tip"
         transform = np.eye(4)
         visited = set()
@@ -118,7 +128,7 @@ class ArmKinematics:
                 fixed[:3, 3] = as_xyz(origin.get("xyz", "0 0 0"))
                 fixed[:3, :3] = rpy_matrix(as_xyz(origin.get("rpy", "0 0 0")))
             transform = fixed @ transform
-            link = joint.find("parent").attrib["link"]
+            link = self.joint_link(joint, "parent")
         return transform
     
     #入力：URDFのファイルパス、出力：関節情報のリスト
@@ -284,12 +294,16 @@ class ArmKinematics:
 
 
 def main():
-    arm = ArmKinematics()
+    arm = ArmKinematics(
+        urdf_path=URDF,
+        base_link="base_link",
+        tcp_xyz=(0.0, 0.0, 0.0),
+    )
 
     q = np.array([0.0, 1.5, -1.2, 0.0, 0.2])
     goal = arm.position(q)
 
-    seed = np.array([0.0, 1.75, -1.57, -0.5, 0.0])
+    seed = np.array([0.0, 1.70, -1.57, -0.5, 0.0])
 
     result = arm.solve_position_IK(
         target=goal,
