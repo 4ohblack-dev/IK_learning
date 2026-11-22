@@ -44,10 +44,13 @@ DIRECTIONS = [-1,-1,-1,1,1]
 CONTROLLER_SPEED = 800
 CONTROLLER_ACCELERATION = 50
 IK_POSITION_TOLERANCE_M = 0.00005
-CONTROLLER_IK_MAX_ITERATIONS = 300
+CONTROLLER_IK_MAX_ITERATIONS = 20
+CONTROLLER_IK_DAMPING = 0.02
 CONTROL_POLL_INTERVAL_S = 0.02
 CONTROLLER_VELOCITY_M_S = 0.05
 INPUT_SMOOTHING_S = 0.05
+JOYSTICK_DEADZONE = 0.10
+LEFT_STICK_CROSS_AXIS_RATIO = 0.25
 JOYSTICK_RESUME_DELAY_S = 1.0
 SERVO_READ_ATTEMPTS = 3
 SERVO_READ_RETRY_DELAY_S = 0.005
@@ -69,6 +72,26 @@ def measured_control_q(arm, q, servo_ids):
         raise ValueError("操作開始を保留: " + "; ".join(details)
                          + "。姿勢・校正値を確認してください（許容ずれ2度）。")
     return bounded
+
+
+def joystick_direction(inputs):
+    """Filter stick noise in base XYZ, preserving deliberate diagonal input."""
+    direction = np.array([inputs.leftX, inputs.leftY, inputs.rightY], dtype=float)
+    direction[np.abs(direction) < JOYSTICK_DEADZONE] = 0.0
+    left_magnitudes = np.abs(direction[:2])
+    direction[:2] = np.where(
+        left_magnitudes < LEFT_STICK_CROSS_AXIS_RATIO * left_magnitudes.max(),
+        0.0,
+        direction[:2],
+    )
+    return direction
+
+
+def update_filtered_direction(filtered, direction, dt):
+    """Ramp active components while stopping released axes immediately."""
+    filtered[direction == 0.0] = 0.0
+    filtered += (dt / (INPUT_SMOOTHING_S + dt)) * (direction - filtered)
+
 
 def run(port, servo_ids, reference_q, directions):
     arm = ArmKinematics()
@@ -106,7 +129,7 @@ def run(port, servo_ids, reference_q, directions):
 
         previous_button = bool(controller.read().tri_button)
         print(f"XYZ速度 = [+左X, +左Y, +右Y] × {CONTROLLER_VELOCITY_M_S * 1000:g}mm/s × スティック値。")
-        print("左スティック左右: X方向、上下: Y方向、右スティック上下: Z方向")
+        print("左スティック上下: X方向、左右: Y方向、右スティック上下: Z方向")
         print(f"目標更新周期: {CONTROL_POLL_INTERVAL_S * 1000:g}ms。入力を平滑化して連続送信します。")
         print("終了時は全軸のトルクを解除します。終了前にアームを支えてください。")
         print("△: 初期校正 / ユーザーゼロ設定。終了: Ctrl+C")
@@ -255,11 +278,8 @@ def run(port, servo_ids, reference_q, directions):
                             f"姿勢に到達できません: 誤差[deg]={np.degrees(angle_error)}, moving={moving}"
                         )
             elif calibrated:
-                direction = np.array([
-                    inputs.leftX, inputs.leftY, inputs.rightY,
-                ], dtype=float)
-                smoothing = dt / (INPUT_SMOOTHING_S + dt) if dt > 0 else 0.0
-                filtered_direction += smoothing * (direction - filtered_direction)
+                direction = joystick_direction(inputs)
+                update_filtered_direction(filtered_direction, direction, dt)
 
                 if np.any(direction) and commanded_xyz is None:
                     positions = servo.read_positions(servo_ids)
@@ -283,7 +303,7 @@ def run(port, servo_ids, reference_q, directions):
                     )
                     states = read_servo_control_state(servo, servo_ids)
                     print("ジョイスティック制御開始: サーボ状態", states)
-                if commanded_xyz is not None and np.any(np.abs(filtered_direction) > 1e-4):
+                if dt > 0 and commanded_xyz is not None and np.any(filtered_direction):
                     target = commanded_xyz + filtered_direction * CONTROLLER_VELOCITY_M_S * dt
                     try:
                         result, target = solve_joystick_step(
@@ -335,31 +355,33 @@ def run(port, servo_ids, reference_q, directions):
 def solve_joystick_step(
     arm: ArmKinematics, seed, origin, target, max_joint_step=None,
 ) -> tuple[IKResult, NDArray[np.float64]]:
-    """Shorten an unreachable joystick step without changing its direction."""
+    """Only accept Cartesian waypoints on the requested segment and within joint speed."""
+    if max_joint_step is not None and (not np.isfinite(max_joint_step) or max_joint_step < 0):
+        raise ValueError("max_joint_step must be finite and nonnegative")
     delta = target - origin
-    last_error = float("inf")
-    result: IKResult
-    for scale in (1.0, 0.5, 0.25, 0.125):
+    rate_limited = False
+    scale = 1.0
+    for _ in range(5):
         candidate = origin + scale * delta
         result = arm.solve_position_IK(
             target=candidate, seed=seed, tol=IK_POSITION_TOLERANCE_M,
-            max_iter=CONTROLLER_IK_MAX_ITERATIONS,
+            max_iter=CONTROLLER_IK_MAX_ITERATIONS, damping=CONTROLLER_IK_DAMPING,
         )
-        last_error = result['error']
-        if result['success']:
-            if max_joint_step is not None:
-                if not np.isfinite(max_joint_step) or max_joint_step < 0:
-                    raise ValueError("max_joint_step must be finite and nonnegative")
-                delta_q = result['q'] - seed
-                largest = float(np.max(np.abs(delta_q)))
-                if largest > max_joint_step:
-                    limited_q = seed + delta_q * (max_joint_step / largest)
-                    # Integrate from the achievable command, not the Cartesian
-                    # target the joints could not follow this cycle.
-                    candidate = arm.position(limited_q)
-                    result = {**result, "q": limited_q, "error": 0.0}
-            return result, candidate
-    raise ValueError(f"IK unsuccessful (joint/workspace limit). error: {last_error:.6f} m")
+        if not result["success"]:
+            scale *= 0.5
+            continue
+        largest_step = np.max(np.abs(result["q"] - seed))
+        if max_joint_step is not None and largest_step > max_joint_step:
+            rate_limited = True
+            # The Jacobian gives a local estimate of how much to shorten the
+            # Cartesian step. Solve again and check the joint limit explicitly.
+            scale *= 0.98 * min(max_joint_step / largest_step, 0.9)
+            continue
+        # Keep the commanded line as the next origin. FK may differ by the IK tolerance.
+        return result, candidate
+    if rate_limited:
+        raise ValueError("IK step exceeds the joint speed limit")
+    raise ValueError(f"IK unsuccessful (joint/workspace limit). error: {result['error']:.6f} m")
 
 
 def move_to_xyz(
