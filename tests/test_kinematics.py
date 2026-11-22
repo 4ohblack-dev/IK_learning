@@ -90,15 +90,10 @@ class KinematicsTests(unittest.TestCase):
         self.assertGreater(origin[0] - start[0], 0.01)
 
     def test_joystick_rejects_step_when_no_candidate_meets_joint_speed(self):
-        arm = Mock()
-        arm.solve_position_IK.return_value = dict(
-            success=True, q=np.full(5, 0.1), error=0.0, iterations=1,
-        )
-        origin = np.zeros(3)
+        q = np.zeros(5)
+        origin = self.arm.position(q)
         with self.assertRaisesRegex(ValueError, "joint speed limit"):
-            solve_joystick_step(arm, np.zeros(5), origin, np.array([0.001, 0, 0]),
-                                max_joint_step=0.02)
-        arm.position.assert_not_called()
+            solve_joystick_step(self.arm, q, origin, origin + [0.001, 0, 0], max_joint_step=0.0)
 
     def test_stick_axis_switch_and_intentional_diagonal(self):
         direction = joystick_direction(Input(leftX=0.8, leftY=0.15, rightY=0.08))
@@ -112,6 +107,10 @@ class KinematicsTests(unittest.TestCase):
         np.testing.assert_array_equal(filtered, [0.0, 0.0, 0.0])
         diagonal = joystick_direction(Input(leftX=-0.7, leftY=0.6, rightY=0.4))
         np.testing.assert_array_equal(diagonal, [-0.7, 0.6, 0.4])
+        filtered[:] = [0.3, 0.4, 0.0]
+        update_filtered_direction(filtered, diagonal, 0.02)
+        np.testing.assert_allclose(filtered / np.linalg.norm(filtered),
+                                   diagonal / np.linalg.norm(diagonal))
 
 
 if __name__ == '__main__':

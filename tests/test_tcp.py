@@ -2,10 +2,23 @@ import unittest
 
 import numpy as np
 
-from mathmetics import ArmKinematics
+from control_arm import REFERENCE_Q
+from mathmetics import ARM_NAMES, ArmKinematics
 
 
 class TcpTests(unittest.TestCase):
+    def test_calibration_angles_align_joint_centers(self):
+        centers = [
+            ArmKinematics(joint_names=ARM_NAMES[:length], tcp_xyz=(0, 0, 0)).position(
+                REFERENCE_Q[:length],
+            )
+            for length in (2, 3, 4, 5)
+        ]
+        shoulder, elbow, wrist, roll = centers
+        np.testing.assert_allclose(elbow - shoulder, [0, 0, 0.116000021], atol=1e-7)
+        np.testing.assert_allclose(wrist - elbow, [0.135000185, 0, 0], atol=1e-7)
+        np.testing.assert_allclose(roll - wrist, [0.0601, 0, 0], atol=1e-7)
+
     def test_fixed_jaw_tip_is_default_in_multiple_poses(self):
         arm = ArmKinematics()
         flange = ArmKinematics(tcp_xyz=(0, 0, 0))

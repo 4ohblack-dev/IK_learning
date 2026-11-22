@@ -10,8 +10,11 @@ if str(ST3215_SOURCE) not in sys.path:
 
 from st3215 import ST3215
 from st3215.port_handler import PortHandler
-from st3215.values import STS_TORQUE_ENABLE, COMM_RX_TIMEOUT, COMM_RX_CORRUPT
+from st3215.values import STS_PRESENT_POSITION_L, STS_TORQUE_ENABLE, COMM_RX_TIMEOUT, COMM_RX_CORRUPT
 from mathmetics import KINEMATICS_MODEL_ID
+
+CALIBRATION_REFERENCE = "so100_upright_joint_centers_v1"
+RADIANS_PER_TICK = 2 * np.pi / 4096
 
 '''
 通信を開く
@@ -37,7 +40,7 @@ class handle_STS3215:
         self.st3215 = ST3215(port)
         self.zero_positions = {}
         self.directions = {}
-        self.calibration_path = (Path(__file__).resolve().parent / "calibration.json")
+        self.calibration_path = Path(__file__).resolve().with_name("calibration.so100_upright.json")
 
     def setup(self,servo_ids):
         failures = []
@@ -63,6 +66,7 @@ class handle_STS3215:
     def save_calibration(self):
         data = {
             "kinematics_model": KINEMATICS_MODEL_ID,
+            "reference_pose": CALIBRATION_REFERENCE,
             "physical_calibration_verified": True,
             "zero_positions": {str(key): float(value) for key, value in self.zero_positions.items()},
             "directions": {str(key): int(value) for key, value in self.directions.items()},
@@ -82,7 +86,8 @@ class handle_STS3215:
             )
         # Model-generated encoder centers are placeholders, not a measured
         # reference pose. Let the controller's triangle action calibrate them.
-        if data.get("physical_calibration_verified") is False:
+        if (data.get("physical_calibration_verified") is not True
+                or data.get("reference_pose") != CALIBRATION_REFERENCE):
             return False
         zeros = {int(key): float(value) for key, value in data["zero_positions"].items()}
         directions = {int(key): int(value) for key, value in data["directions"].items()}
@@ -132,9 +137,13 @@ class handle_STS3215:
     def read_positions(self,servo_ids):
         positions = []
         for servo_id in servo_ids:
-            position = self.st3215.ReadPosition(servo_id)
-            if position is None:
-                raise ConnectionError(f"can't find {servo_id} position")
+            position, comm, error = self._read_with_retry(
+                self.st3215.read2ByteTxRx, servo_id, STS_PRESENT_POSITION_L,
+            )
+            if comm != 0 or error != 0 or not 0 <= position <= 4095:
+                raise ConnectionError(
+                    f"ID {servo_id}: position read failed (value={position}, comm={comm}, error={error})"
+                )
             positions.append(position)
         return positions
 
@@ -145,6 +154,8 @@ class handle_STS3215:
             raise ValueError("servo_ids and positions don't match")
         if not np.all(np.isfinite(positions),):
             raise ValueError("positions must be finite")
+        if np.any(positions < 0) or np.any(positions > 4095):
+            raise ValueError("encoder positions must be within 0..4095")
         q = []
         for servo_id,position in zip(servo_ids,positions):
             zero = self.zero_positions[servo_id]
@@ -154,6 +165,21 @@ class handle_STS3215:
             radians = direction*delta*(2*np.pi/4096)
             q.append(radians)
         return np.array(q,dtype=float)
+
+    def command_angle_limits(self, servo_ids, q_min, q_max):
+        """URDF limits restricted to whole encoder ticks on the calibrated turn."""
+        zeros = np.array([self.zero_positions[servo_id] for servo_id in servo_ids])
+        signs = np.array([self.directions[servo_id] for servo_id in servo_ids])
+        first = zeros + signs * q_min / RADIANS_PER_TICK
+        last = zeros + signs * q_max / RADIANS_PER_TICK
+        # toAngle uses the half-open interval [-2048, 2048) around zero.
+        raw_min = np.maximum(np.ceil(np.minimum(first, last)), np.maximum(0, np.ceil(zeros - 2048)))
+        raw_max = np.minimum(np.floor(np.maximum(first, last)), np.minimum(4095, np.ceil(zeros + 2048) - 1))
+        if np.any(raw_min > raw_max):
+            raise ValueError("calibration leaves no encoder positions within the joint limits")
+        lower = (raw_min - zeros) * signs * RADIANS_PER_TICK
+        upper = (raw_max - zeros) * signs * RADIANS_PER_TICK
+        return np.maximum(q_min, np.minimum(lower, upper)), np.minimum(q_max, np.maximum(lower, upper))
 
     def toPosition(self,servo_ids,q,q_min,q_max):
         servo_ids = tuple(servo_ids)

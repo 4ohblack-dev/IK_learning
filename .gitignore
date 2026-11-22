@@ -1,6 +1,8 @@
 # External repositories cloned locally
 /SO-ARM100/
 /python-st3215/
+/calibration.so100_upright.json
+/calibration.so100_upright.tmp
 
 # Python generated files and local environments
 __pycache__/
