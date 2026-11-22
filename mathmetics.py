@@ -223,13 +223,14 @@ class ArmKinematics:
 def main():
     arm = ArmKinematics(
         urdf_path=URDF,
+        base_link="base_link",
         tcp_xyz=(0.0, 0.0, 0.0),
     )
 
     q = np.array([0.0, 1.5, -1.2, 0.0, 0.2])
     goal = arm.position(q)
 
-    seed = np.array([0.0, 1.75, -1.57, -0.5, 0.0])
+    seed = np.array([0.0, 1.70, -1.57, -0.5, 0.0])
 
     result = arm.solve_position_IK(
         target=goal,
