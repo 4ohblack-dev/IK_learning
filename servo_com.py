@@ -1,4 +1,5 @@
 import sys
+import time
 from pathlib import Path
 import json
 import numpy as np
@@ -9,7 +10,8 @@ if str(ST3215_SOURCE) not in sys.path:
 
 from st3215 import ST3215
 from st3215.port_handler import PortHandler
-from st3215.values import STS_TORQUE_ENABLE
+from st3215.values import STS_TORQUE_ENABLE, COMM_RX_TIMEOUT, COMM_RX_CORRUPT
+from mathmetics import KINEMATICS_MODEL_ID
 
 '''
 通信を開く
@@ -38,12 +40,30 @@ class handle_STS3215:
         self.calibration_path = (Path(__file__).resolve().parent / "calibration.json")
 
     def setup(self,servo_ids):
-        missing = [servo_id for servo_id in servo_ids if not self.st3215.PingServo(servo_id)]
-        if missing:
-            raise ConnectionError(f"not found id:{missing}")
+        failures = []
+        for servo_id in servo_ids:
+            model, comm, error = self._read_with_retry(self.st3215.ping, servo_id)
+            if comm != 0 or error != 0 or model == 0:
+                failures.append(f"ID {servo_id}: model={model}, comm={comm}, error={error}")
+        if failures:
+            raise ConnectionError("Servo setup failed: " + "; ".join(failures))
+
+    def _read_with_retry(self, reader, *args):
+        """Retry only missing/corrupt replies, never motion commands or hardware errors."""
+        for attempt in range(3):
+            result = reader(*args)
+            _, comm, error = result
+            if error != 0 or comm not in (COMM_RX_TIMEOUT, COMM_RX_CORRUPT):
+                return result
+            if attempt < 2:
+                time.sleep(0.02)
+                self.st3215.portHandler.ser.reset_input_buffer()
+        return result
 
     def save_calibration(self):
         data = {
+            "kinematics_model": KINEMATICS_MODEL_ID,
+            "physical_calibration_verified": True,
             "zero_positions": {str(key): float(value) for key, value in self.zero_positions.items()},
             "directions": {str(key): int(value) for key, value in self.directions.items()},
         }
@@ -56,6 +76,14 @@ class handle_STS3215:
             return False
 
         data = json.loads(self.calibration_path.read_text(encoding="utf-8"))
+        if data.get("kinematics_model") != KINEMATICS_MODEL_ID:
+            raise ValueError(
+                "calibration uses a different kinematics model; recalibrate using the SO100 image-zero pose"
+            )
+        # Model-generated encoder centers are placeholders, not a measured
+        # reference pose. Let the controller's triangle action calibrate them.
+        if data.get("physical_calibration_verified") is False:
+            return False
         zeros = {int(key): float(value) for key, value in data["zero_positions"].items()}
         directions = {int(key): int(value) for key, value in data["directions"].items()}
 
@@ -166,7 +194,9 @@ class handle_STS3215:
         for servo_id in servo_ids:
             try:
                 self.st3215.StopServo(servo_id)
-                state = self.st3215.read1ByteTxRx(servo_id, STS_TORQUE_ENABLE)
+                state = self._read_with_retry(
+                    self.st3215.read1ByteTxRx, servo_id, STS_TORQUE_ENABLE,
+                )
                 if state != (0, 0, 0):
                     raise ConnectionError(f"torque readback={state}")
             except Exception as error:

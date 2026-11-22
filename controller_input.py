@@ -71,8 +71,8 @@ class Controller(object):
                     raise ValueError("controller removed")
 
         return Input(
-            leftX = deadzone(self.joy.get_axis(0)),
-            leftY = deadzone(self.joy.get_axis(1)),
+            leftX = deadzone(self.joy.get_axis(1)),
+            leftY = deadzone(-self.joy.get_axis(0)),
             rightX = deadzone(self.joy.get_axis(2)),
             rightY = deadzone(self.joy.get_axis(3)),
             rotL = deadzone(self.joy.get_axis(4)),
