@@ -211,7 +211,8 @@ class PlaybackTests(unittest.TestCase):
 
     def test_one_joystick_step_exceeds_ik_tolerance_and_moves_encoder(self):
         servo = FakeServo(Clock())
-        servo.positions.update(dict(zip(control.SERVO_IDS, [1990, 2045, 1966, 2224, 2036])))
+        initial_positions = [1990, 2045, 2048, 2224, 2036]
+        servo.positions.update(dict(zip(control.SERVO_IDS, initial_positions)))
         arm = control.ArmKinematics()
         q = servo.toAngle(control.SERVO_IDS, servo.read_positions(control.SERVO_IDS))
         position = arm.position(q)
@@ -229,7 +230,7 @@ class PlaybackTests(unittest.TestCase):
         new_positions = servo.toPosition(
             control.SERVO_IDS, new_tolerance['q'], arm.q_min, arm.q_max,
         )
-        self.assertEqual(old_positions, [1990, 2045, 1966, 2224, 2036])
+        self.assertEqual(old_positions, initial_positions)
         self.assertNotEqual(new_positions, old_positions)
 
     def test_disabled_torque_and_wrong_mode_are_detected(self):
