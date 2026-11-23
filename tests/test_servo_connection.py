@@ -5,6 +5,8 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
+import numpy as np
+
 import control_arm as control
 from servo_com import handle_STS3215, COMM_RX_CORRUPT
 
@@ -24,7 +26,10 @@ class ConnectionTests(unittest.TestCase):
             }))
             self.assertFalse(servo.load_calibration([1]))
             self.assertEqual(servo.zero_positions, {})
-            servo.st3215.ReadPosition.return_value = 3100
+            legacy = json.loads(servo.calibration_path.read_text())
+            servo.calibration_path.write_text(json.dumps({**legacy, 'physical_calibration_verified': True}))
+            self.assertFalse(servo.load_calibration([1]))
+            servo.st3215.read2ByteTxRx.return_value = (3100, 0, 0)
             servo.calibrate_and_save([1], [0.0], [-1])
             saved = json.loads(servo.calibration_path.read_text())
             self.assertIs(saved['physical_calibration_verified'], True)
@@ -32,6 +37,28 @@ class ConnectionTests(unittest.TestCase):
             self.assertTrue(servo.load_calibration([1]))
             self.assertEqual(servo.toAngle([1], [3100]).tolist(), [0.0])
             servo.st3215.WritePosition.assert_not_called()
+
+    def test_encoder_bounds_round_trip_inside_one_turn_and_urdf(self):
+        servo = self.servo()
+        ids = [1, 2, 3]
+        servo.zero_positions = {1: 2048, 2: 3059, 3: 2007.25}
+        servo.directions = {1: -1, 2: 1, 3: -1}
+        q_min = np.array([-4.0, -4.0, -3.0])
+        q_max = np.array([4.0, 4.0, 0.0])
+        lower, upper = servo.command_angle_limits(ids, q_min, q_max)
+        for q in (lower, upper):
+            positions = servo.toPosition(ids, q, q_min, q_max)
+            np.testing.assert_allclose(servo.toAngle(ids, positions), q, atol=1e-12)
+        self.assertLess(upper[1], 1.59)
+        self.assertLess(upper[2], 0)
+
+    @patch('servo_com.time.sleep')
+    def test_encoder_feedback_retries_corrupt_read_only(self, sleep):
+        servo = self.servo()
+        servo.st3215.read2ByteTxRx.side_effect = [(0, COMM_RX_CORRUPT, 0), (1870, 0, 0)]
+        self.assertEqual(servo.read_positions([1]), [1870])
+        servo.st3215.portHandler.ser.reset_input_buffer.assert_called_once()
+        servo.st3215.WritePosition.assert_not_called()
 
     def servo(self):
         servo = handle_STS3215.__new__(handle_STS3215)

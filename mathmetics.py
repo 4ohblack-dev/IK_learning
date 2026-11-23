@@ -219,10 +219,19 @@ class ArmKinematics:
                                 for axis, origin in zip(axes, origins)])
 
 #target:目標位置、seed:IKの初期関節角度、tol:位置誤差の許容値、max_iter:最大反復回数、damping:DLSの減衰係数、max_step:1回の香辛料のノルム上限
-    def solve_position_IK(self,target, seed,tol=0.002, max_iter=300,damping=0.04, max_step=0.10) -> IKResult:
+    def solve_position_IK(
+        self, target, seed, tol=0.002, max_iter=300, damping=0.04, max_step=0.10,
+        *, joint_limits=None,
+    ) -> IKResult:
         target = self.validate_vector(target,3,"target")
         q = self.validate_vector(seed,self.dof,"seed")
-        if np.any(q < self.q_min) or np.any(q > self.q_max):
+        lower, upper = self.q_min, self.q_max
+        if joint_limits is not None:
+            lower = np.maximum(lower, self.validate_q(joint_limits[0]))
+            upper = np.minimum(upper, self.validate_q(joint_limits[1]))
+            if np.any(lower > upper):
+                raise ValueError("joint limits do not overlap URDF limits")
+        if np.any(q < lower) or np.any(q > upper):
             raise ValueError("seed is outside joint limits")
 
         #isinstance:ある変数（オブジェクト）が、指定した型に属しているかを判定する
@@ -256,8 +265,8 @@ class ArmKinematics:
                 dq.fill(0.0)
                 dq[free] = active_J.T @ np.linalg.solve(A, e)
                 blocked = free & (
-                    ((q <= self.q_min + 1e-10) & (dq < 0)) |
-                    ((q >= self.q_max - 1e-10) & (dq > 0))
+                    ((q <= lower + 1e-10) & (dq < 0)) |
+                    ((q >= upper - 1e-10) & (dq > 0))
                 )
                 if not np.any(blocked):
                     break
@@ -270,7 +279,7 @@ class ArmKinematics:
             iterations = k+1
 
             for scale in (1.0, 0.5, 0.25, 0.125, 0.0625):
-                trial = np.clip(q + scale*dq,self.q_min,self.q_max)
+                trial = np.clip(q + scale*dq, lower, upper)
                 trial_err = np.linalg.norm(target - self.fk(trial)[:3,3])
                 if trial_err < err:
                     q = trial

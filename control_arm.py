@@ -7,7 +7,7 @@ from datetime import datetime
 
 from controller_input import Controller
 from mathmetics import ArmKinematics, IKResult, KINEMATICS_MODEL_ID
-from servo_com import ST3215
+from servo_com import CALIBRATION_REFERENCE, RADIANS_PER_TICK, ST3215
 from st3215.values import (
     STS_MODE, STS_TORQUE_ENABLE, STS_GOAL_POSITION_L, STS_ACC, STS_GOAL_SPEED_L,
     COMM_RX_TIMEOUT, COMM_RX_CORRUPT,
@@ -39,7 +39,8 @@ from servo_com import handle_STS3215
 
 PORT = "COM9"
 SERVO_IDS = [1, 2, 3, 4, 5]
-REFERENCE_Q = [0.0, 0.0, 0.0, 0.0, 0.0]
+# Native URDF angles for upright upper-arm and forward horizontal forearm/wrist.
+REFERENCE_Q = [0.0, 1.55621943, -1.28847511, -0.60932432, 0.0]
 DIRECTIONS = [-1,-1,-1,1,1]
 CONTROLLER_SPEED = 800
 CONTROLLER_ACCELERATION = 50
@@ -48,6 +49,8 @@ CONTROLLER_IK_MAX_ITERATIONS = 20
 CONTROLLER_IK_DAMPING = 0.02
 CONTROL_POLL_INTERVAL_S = 0.02
 CONTROLLER_VELOCITY_M_S = 0.05
+TRACKING_TOLERANCE_M = 0.0015
+TRACKING_TOLERANCE_TICKS = 6
 INPUT_SMOOTHING_S = 0.05
 JOYSTICK_DEADZONE = 0.10
 LEFT_STICK_CROSS_AXIS_RATIO = 0.25
@@ -88,9 +91,14 @@ def joystick_direction(inputs):
 
 
 def update_filtered_direction(filtered, direction, dt):
-    """Ramp active components while stopping released axes immediately."""
-    filtered[direction == 0.0] = 0.0
-    filtered += (dt / (INPUT_SMOOTHING_S + dt)) * (direction - filtered)
+    """Smooth speed while keeping the current stick direction."""
+    magnitude = np.linalg.norm(direction)
+    if magnitude == 0.0:
+        filtered.fill(0.0)
+        return
+    speed = np.linalg.norm(filtered)
+    speed += (dt / (INPUT_SMOOTHING_S + dt)) * (min(magnitude, 1.0) - speed)
+    filtered[:] = direction * (speed / magnitude)
 
 
 def run(port, servo_ids, reference_q, directions):
@@ -101,7 +109,10 @@ def run(port, servo_ids, reference_q, directions):
     controller = Controller()
     servo = None
     commanded_xyz: NDArray[np.float64] | None = None
-    commanded_q: NDArray[np.float64] | None = None
+    goal: tuple[NDArray[np.int64], NDArray[np.float64]] | None = None
+    command_limits = None
+    joystick_ready = False
+    wait_for_neutral = False
     filtered_direction = np.zeros(3, dtype=float)
     last_update = time.monotonic()
     last_error_print = 0.0
@@ -120,12 +131,13 @@ def run(port, servo_ids, reference_q, directions):
 
         calibrated = servo.load_calibration(servo_ids)
         if calibrated:
+            command_limits = servo.command_angle_limits(servo_ids, arm.q_min, arm.q_max)
             print("calibrated. load initial position & set user zero if press △")
         else:
             if reference_q is None or directions is None:
                 raise ValueError("set reference_q and directions")
             user_zero.validate_model_q(reference_q)
-            print("set initial position & press △. follow the picture")
+            print("新しい基準姿勢の校正が必要です。IMPORTS.md の手順で姿勢を合わせてから △ を押してください。")
 
         previous_button = bool(controller.read().tri_button)
         print(f"XYZ速度 = [+左X, +左Y, +右Y] × {CONTROLLER_VELOCITY_M_S * 1000:g}mm/s × スティック値。")
@@ -142,7 +154,7 @@ def run(port, servo_ids, reference_q, directions):
         while True:
             inputs = controller.read()
             now = time.monotonic()
-            dt = min(max(now - last_update, 0.0), 0.05)
+            dt = min(max(now - last_update, 0.0), CONTROL_POLL_INTERVAL_S)
             last_update = now
             current_rec_button = bool(inputs.rec_button)
             rec_pressed = current_rec_button and not previous_rec_button
@@ -156,6 +168,7 @@ def run(port, servo_ids, reference_q, directions):
                         current_q = servo.toAngle(servo_ids,positions)
                         pose = {
                             "kinematics_model": KINEMATICS_MODEL_ID,
+                            "reference_pose": CALIBRATION_REFERENCE,
                             "recorded_at": datetime.now().astimezone().isoformat(),
                             "servo_ids": list(servo_ids),
                             "positions": [int(p) for p in positions],
@@ -195,22 +208,21 @@ def run(port, servo_ids, reference_q, directions):
                                     pose = json.loads(line)
                                 except json.JSONDecodeError as error:
                                     raise ValueError(f"line {line_number} : data is broken") from error
-                                if pose.get("kinematics_model") != KINEMATICS_MODEL_ID:
-                                    if pose.get("servo_ids") != list(servo_ids) or pose.get("positions") is None:
-                                        raise ValueError(
-                                            f"line {line_number}: incompatible saved pose; servo positions are required"
-                                        )
+                                if pose.get("servo_ids") == list(servo_ids) and pose.get("positions") is not None:
                                     pose["joint_angles_rad"] = servo.toAngle(
                                         servo_ids, pose["positions"],
                                     ).tolist()
                                     pose["kinematics_model"] = KINEMATICS_MODEL_ID
-                                    print(f"line {line_number}: saved pose converted from encoder positions")
+                                elif (pose.get("kinematics_model") != KINEMATICS_MODEL_ID
+                                      or pose.get("reference_pose") != CALIBRATION_REFERENCE):
+                                    raise ValueError(f"line {line_number}: saved pose needs encoder positions")
                                 poses.append(pose)
                         if not poses:
                             raise ValueError("no position data")
                         moving_pose_q = move_to_pose(arm, servo, servo_ids, poses[-1])
                         commanded_xyz = None
-                        commanded_q = None
+                        goal = None
+                        joystick_ready = False
                         filtered_direction.fill(0.0)
                         joystick_resume_at = None
                         deadline = time.monotonic() + 30.0
@@ -234,8 +246,10 @@ def run(port, servo_ids, reference_q, directions):
                 else:
                     if not calibrated:
                         servo.calibrate_and_save(servo_ids,reference_q,directions)
+                        command_limits = servo.command_angle_limits(servo_ids, arm.q_min, arm.q_max)
                         calibrated = True
-                        print("save initial calibration")
+                        wait_for_neutral = True
+                        print("校正を保存しました。スティックを中央に戻すと操作できます。")
 
                     positions = servo.read_positions(servo_ids)
                     current_q = servo.toAngle(servo_ids, positions)
@@ -263,7 +277,7 @@ def run(port, servo_ids, reference_q, directions):
                         moving_pose_q = None
                         joystick_resume_at = None
                         commanded_xyz = None
-                        commanded_q = None
+                        goal = None
                         filtered_direction.fill(0.0)
                         print("ジョイスティック操作を再開しました")
                 else:
@@ -281,45 +295,64 @@ def run(port, servo_ids, reference_q, directions):
                 direction = joystick_direction(inputs)
                 update_filtered_direction(filtered_direction, direction, dt)
 
-                if np.any(direction) and commanded_xyz is None:
-                    positions = servo.read_positions(servo_ids)
+                if not np.any(direction):
+                    # Re-anchor the next stroke only after the pending goal has settled.
+                    commanded_xyz = None
+                    wait_for_neutral = False
+                elif not wait_for_neutral and dt > 0 and command_limits is not None:
                     try:
-                        commanded_q = measured_control_q(
-                            arm, servo.toAngle(servo_ids, positions), servo_ids,
-                        )
-                    except ValueError as error:
-                        commanded_q = None
-                        filtered_direction.fill(0.0)
-                        if now - last_error_print >= 1.0:
-                            print(error)
-                            last_error_print = now
-                        time.sleep(CONTROL_POLL_INTERVAL_S)
-                        continue
-                    commanded_xyz = arm.position(commanded_q)
-                    enable_position_control(
-                        servo, servo_ids,
-                        speed=CONTROLLER_SPEED,
-                        acc=CONTROLLER_ACCELERATION,
-                    )
-                    states = read_servo_control_state(servo, servo_ids)
-                    print("ジョイスティック制御開始: サーボ状態", states)
-                if dt > 0 and commanded_xyz is not None and np.any(filtered_direction):
-                    target = commanded_xyz + filtered_direction * CONTROLLER_VELOCITY_M_S * dt
-                    try:
+                        positions = np.asarray(servo.read_positions(servo_ids))
+                        measured_q = servo.toAngle(servo_ids, positions)
+                        measured_xyz = arm.position(measured_q)
+                        previous_goal = positions
+                        if goal is not None:
+                            goal_positions, goal_xyz = goal
+                            previous_goal = goal_positions
+                            lag_ticks = np.max(np.abs(positions - goal_positions))
+                            lag_m = np.linalg.norm(measured_xyz - goal_xyz)
+                            if lag_ticks > TRACKING_TOLERANCE_TICKS or lag_m > TRACKING_TOLERANCE_M:
+                                raise ValueError(f"爪先の追従待ち: {lag_m * 1000:.2f} mm, {lag_ticks} ticks")
+
+                        seed = np.clip(measured_control_q(arm, measured_q, servo_ids), *command_limits)
+                        max_joint_step = (CONTROLLER_SPEED * RADIANS_PER_TICK * dt
+                                          - np.max(np.abs(seed - measured_q)))
+                        if max_joint_step <= 0:
+                            raise ValueError("実測角度から関節範囲に戻るには速度上限を超えます。")
+                        if commanded_xyz is None:
+                            bounded_positions = servo.toPosition(servo_ids, seed, *command_limits)
+                            if np.any(np.abs(positions - bounded_positions) * RADIANS_PER_TICK
+                                      > MEASURED_LIMIT_TOLERANCE_RAD):
+                                raise ValueError("実測角度が校正済みのエンコーダ範囲外です。")
+                            if not joystick_ready:
+                                enable_position_control(
+                                    servo, servo_ids, speed=CONTROLLER_SPEED, acc=CONTROLLER_ACCELERATION,
+                                )
+                                states = read_servo_control_state(servo, servo_ids)
+                                print("ジョイスティック制御開始: サーボ状態", states)
+                                joystick_ready = True
+                                # Torque setup may move the joints. Seed the line on the next read.
+                                time.sleep(CONTROL_POLL_INTERVAL_S)
+                                continue
+                            commanded_xyz = measured_xyz
+
+                        target = commanded_xyz + filtered_direction * CONTROLLER_VELOCITY_M_S * dt
                         result, target = solve_joystick_step(
-                            arm, commanded_q, commanded_xyz, target,
-                            max_joint_step=CONTROLLER_SPEED * (2 * np.pi / 4096) * dt,
+                            arm, seed, commanded_xyz, target,
+                            max_joint_step=max_joint_step,
+                            joint_limits=command_limits,
                         )
-                        target_positions = servo.toPosition(
-                            servo_ids, result["q"], arm.q_min, arm.q_max,
-                        )
+                        target_positions = servo.toPosition(servo_ids, result["q"], *command_limits)
                         # Broadcast success only confirms transmission. Use acknowledged
                         # goal writes so a rejected command cannot silently advance IK.
-                        write_position_targets(servo, servo_ids, target_positions)
+                        if not np.array_equal(target_positions, previous_goal):
+                            write_position_targets(servo, servo_ids, target_positions)
+                            goal_positions = np.asarray(target_positions)
+                            goal = goal_positions, arm.position(servo.toAngle(servo_ids, goal_positions))
                         commanded_xyz = target
-                        commanded_q = result["q"].copy()
                         if now - last_diagnostic >= 1.0:
-                            print("スティック入力=", direction, "送信位置=", target_positions)
+                            print("スティック=", direction,
+                                  "爪先 実測FK[mm]=", np.round(1000 * measured_xyz, 1),
+                                  "目標[mm]=", np.round(1000 * target, 1))
                             last_diagnostic = now
                     except ValueError as error:
                         if now - last_error_print >= 1.0:
@@ -353,35 +386,26 @@ def run(port, servo_ids, reference_q, directions):
 
 
 def solve_joystick_step(
-    arm: ArmKinematics, seed, origin, target, max_joint_step=None,
+    arm: ArmKinematics, seed, origin, target, max_joint_step=None, *, joint_limits=None,
 ) -> tuple[IKResult, NDArray[np.float64]]:
-    """Only accept Cartesian waypoints on the requested segment and within joint speed."""
+    """Solve on the Cartesian segment under encoder and per-cycle joint limits."""
     if max_joint_step is not None and (not np.isfinite(max_joint_step) or max_joint_step < 0):
         raise ValueError("max_joint_step must be finite and nonnegative")
+    if max_joint_step is not None:
+        lower, upper = (arm.q_min, arm.q_max) if joint_limits is None else joint_limits
+        joint_limits = np.maximum(lower, seed - max_joint_step), np.minimum(upper, seed + max_joint_step)
     delta = target - origin
-    rate_limited = False
-    scale = 1.0
-    for _ in range(5):
+    for scale in (1.0, 0.5, 0.25, 0.125, 0.0625):
         candidate = origin + scale * delta
         result = arm.solve_position_IK(
             target=candidate, seed=seed, tol=IK_POSITION_TOLERANCE_M,
             max_iter=CONTROLLER_IK_MAX_ITERATIONS, damping=CONTROLLER_IK_DAMPING,
+            joint_limits=joint_limits,
         )
-        if not result["success"]:
-            scale *= 0.5
-            continue
-        largest_step = np.max(np.abs(result["q"] - seed))
-        if max_joint_step is not None and largest_step > max_joint_step:
-            rate_limited = True
-            # The Jacobian gives a local estimate of how much to shorten the
-            # Cartesian step. Solve again and check the joint limit explicitly.
-            scale *= 0.98 * min(max_joint_step / largest_step, 0.9)
-            continue
-        # Keep the commanded line as the next origin. FK may differ by the IK tolerance.
-        return result, candidate
-    if rate_limited:
-        raise ValueError("IK step exceeds the joint speed limit")
-    raise ValueError(f"IK unsuccessful (joint/workspace limit). error: {result['error']:.6f} m")
+        if result["success"]:
+            # Preserve the ideal line while measured FK lags or differs by rounding.
+            return result, candidate
+    raise ValueError(f"IK unsuccessful (workspace, encoder or joint speed limit). error: {result['error']:.6f} m")
 
 
 def move_to_xyz(

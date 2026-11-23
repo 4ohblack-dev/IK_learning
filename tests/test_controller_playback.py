@@ -73,7 +73,7 @@ class FakeServo(handle_STS3215):
         return 0, 0
 
     def WritePosition(self, servo_id, position):
-        if self.torque:
+        if self.torque and self.positions[servo_id] != position:
             self.sent.append(self.clock.now)
         self.positions[servo_id] = position
         return True
@@ -196,6 +196,67 @@ class PlaybackTests(unittest.TestCase):
 
     def test_joystick_without_playback(self):
         self.assertLess(self.exercise(playback=False).sent[0], 0.1)
+
+    def test_next_axis_waits_for_encoder_tracking_after_neutral(self):
+        clock = Clock()
+
+        class LaggingServo(FakeServo):
+            def __init__(self):
+                super().__init__(clock)
+                self.positions[1] = 1320
+                self.pending = self.positions.copy()
+
+            def WritePosition(self, servo_id, position):
+                if self.torque:
+                    self.sent.append(clock.now)
+                self.pending[servo_id] = position
+                return True
+
+        servo = LaggingServo()
+
+        class Controller:
+            def getController(self):
+                return True
+
+            def read(self):
+                if clock.now >= 0.40:
+                    raise KeyboardInterrupt
+                if clock.now >= 0.22:
+                    servo.positions.update(servo.pending)
+                if clock.now < 0.10:
+                    return Input(leftY=1.0)
+                if clock.now < 0.14:
+                    return Input()
+                return Input(leftX=-1.0)
+
+            def close(self):
+                pass
+
+        with (patch.object(control, 'Controller', Controller),
+              patch.object(control, 'handle_STS3215', return_value=servo),
+              patch.object(control, 'time', clock),
+              contextlib.redirect_stdout(io.StringIO())):
+            control.run('mock', control.SERVO_IDS, control.REFERENCE_Q, control.DIRECTIONS)
+
+        self.assertTrue(any(t < 0.10 for t in servo.sent))
+        self.assertFalse(any(0.14 <= t < 0.22 for t in servo.sent))
+        self.assertTrue(any(t >= 0.22 for t in servo.sent))
+
+    def test_y_motion_uses_other_joints_at_wrist_encoder_limit(self):
+        servo = FakeServo(Clock())
+        ids = control.SERVO_IDS
+        arm = control.ArmKinematics()
+        q = servo.toAngle(ids, [2930, 2011, 3664, 1359, 4095])
+        origin = arm.position(q)
+        limits = servo.command_angle_limits(ids, arm.q_min, arm.q_max)
+        result, waypoint = control.solve_joystick_step(
+            arm, q, origin, origin + [0.0, -0.001, 0.0],
+            max_joint_step=16 * control.RADIANS_PER_TICK, joint_limits=limits,
+        )
+        np.testing.assert_array_equal(waypoint[[0, 2]], origin[[0, 2]])
+        self.assertGreaterEqual(origin[1] - waypoint[1], 0.0005)
+        counts = servo.toPosition(ids, result['q'], *limits)
+        self.assertEqual(counts[-1], 4095)
 
     def test_joystick_works_when_broadcast_is_ignored(self):
         servo = self.exercise(playback=False, ignore_sync=True)
